@@ -20,7 +20,7 @@ if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN not found! Please set it in your .env file.")
 
 DB_PATH = "db.sqlite3"
-MIN_WITHDRAWAL = 5
+MIN_WITHDRAWAL = 10
 GROUP_USERNAME = "ffesportschallenges"
 ADMIN_IDS = [7139153880]  # replace with your Telegram ID
 
@@ -95,7 +95,7 @@ async def start_cmd(m: Message, command: CommandObject):
     ref_link = f"https://t.me/share_and_earn_money_bot?start={m.from_user.id}"
     await m.answer(
         f"👋 Welcome to *FREE FIRE ESPORTS BOT!*\n\n"
-        f"Join our group to continue and claim your ₹2 Welcome Bonus 💰\n\n"
+        f"Join our group to continue and claim your ₹1.5 Welcome Bonus 💰\n\n"
         f"👥 Invite friends & earn!\n"
         f"🔗 Your referral link: [Click Here]({ref_link})",
         reply_markup=join_buttons(),
@@ -140,9 +140,9 @@ async def check_group_join(callback: CallbackQuery):
             await db.execute("UPDATE users SET joined_group=1 WHERE tg_id=?", (user_id,))
         if not got_welcome:
             await db.execute(
-                "UPDATE users SET balance = balance + 2, got_welcome_bonus=1 WHERE tg_id=?", (user_id,)
+                "UPDATE users SET balance = balance + 1.5, got_welcome_bonus=0.5 WHERE tg_id=?", (user_id,)
             )
-            balance += 2
+            balance += 1.5
             await callback.message.answer(f"🎉 Welcome bonus ₹2 added! Your new balance: ₹{balance}")
 
         if (referrer_id is not None) and (referrer_id != user_id) and (ref_bonus_given == 0):
