@@ -20,7 +20,7 @@ if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN not found! Please set it in your .env file.")
 
 DB_PATH = "db.sqlite3"
-MIN_WITHDRAWAL = 5
+MIN_WITHDRAWAL = 2
 GROUP_USERNAME = "ffesportschallenges"
 ADMIN_IDS = [7139153880]  # replace with your Telegram ID
 
