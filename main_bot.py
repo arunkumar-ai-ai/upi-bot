@@ -143,7 +143,7 @@ async def check_group_join(callback: CallbackQuery):
                 "UPDATE users SET balance = balance + 1.5, got_welcome_bonus=0.5 WHERE tg_id=?", (user_id,)
             )
             balance += 1.5
-            await callback.message.answer(f"🎉 Welcome bonus ₹2 added! Your new balance: ₹{balance}")
+            await callback.message.answer(f"🎉 Welcome bonus ₹1.5 added! Your new balance: ₹{balance}")
 
         if (referrer_id is not None) and (referrer_id != user_id) and (ref_bonus_given == 0):
             await db.execute(
