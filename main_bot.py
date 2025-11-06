@@ -94,7 +94,7 @@ async def start_cmd(m: Message, command: CommandObject):
 
     ref_link = f"https://t.me/share_and_earn_money_bot?start={m.from_user.id}"
     await m.answer(
-        f"👋 Welcome to *FREE FIRE ESPORTS BOT!*\n\n"
+        f"👋 Welcome to *EARN MONEY BOT!🤑*\n\n"
         f"Join our group to continue and claim your ₹1.5 Welcome Bonus 💰\n\n"
         f"👥 Invite friends & earn!\n"
         f"🔗 Your referral link: [Click Here]({ref_link})",
@@ -152,7 +152,7 @@ async def check_group_join(callback: CallbackQuery):
                 (referrer_id,)
             )
             await db.execute(
-                "UPDATE users SET balance = balance + 0.5, ref_bonus_given=1 WHERE tg_id=?", (user_id,)
+                "UPDATE users SET balance = balance , ref_bonus_given=1 WHERE tg_id=?", (user_id,)
             )
             try:
                 await bot.send_message(referrer_id, f"🎉 You got ₹1 referral bonus for inviting @{callback.from_user.username or user_id}!")
