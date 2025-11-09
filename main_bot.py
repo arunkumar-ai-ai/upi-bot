@@ -83,24 +83,23 @@ def main_menu():
     ])
 
 # ==========================
-# START (with referral tracking)
+# START
 # ==========================
 @dp.message(Command("start"))
 async def start_cmd(m: Message, command: CommandObject):
     await init_db()
-    referrer_id = None
-    if command.args and command.args.isdigit():
-        referrer_id = int(command.args)
+    referrer_id = int(command.args) if command.args and command.args.isdigit() else None
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT OR IGNORE INTO users (tg_id, username, created_at)
             VALUES (?, ?, ?)
         """, (m.from_user.id, m.from_user.username, datetime.utcnow().isoformat()))
+
         if referrer_id and referrer_id != m.from_user.id:
             cur = await db.execute("SELECT referrer_id FROM users WHERE tg_id=?", (m.from_user.id,))
             row = await cur.fetchone()
-            if row and (row[0] is None):
+            if row and not row[0]:
                 await db.execute("UPDATE users SET referrer_id=? WHERE tg_id=?", (referrer_id, m.from_user.id))
         await db.commit()
 
@@ -116,29 +115,27 @@ async def start_cmd(m: Message, command: CommandObject):
     )
 
 # ==========================
-# CHECK JOIN & VERIFY USER
+# CHECK JOIN & VERIFY
 # ==========================
 @dp.callback_query(F.data == "check_join")
 async def check_group_join(callback: CallbackQuery):
     user_id = callback.from_user.id
 
-    # 🌐 Get user's simulated IP
+    # 🔍 Get IP for device verification
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get("https://api.ipify.org?format=json") as resp:
                 data = await resp.json()
-                user_ip = data.get("ip")
+                user_ip = data.get("ip", f"local-{user_id}")
     except:
         user_ip = f"local-{user_id}"
 
-    # 🔍 Check group join
+    # 🧩 Check if user is in group
     try:
         member = await bot.get_chat_member(f"@{GROUP_USERNAME}", user_id)
-        status = getattr(member, "status", None)
+        if getattr(member, "status", None) not in ["member", "administrator", "creator"]:
+            raise Exception("not joined")
     except:
-        status = None
-
-    if status not in ["member", "administrator", "creator"]:
         await callback.message.answer(
             "❌ Please join the group first!\n"
             f"👉 [Join Group](https://t.me/{GROUP_USERNAME})",
@@ -148,57 +145,52 @@ async def check_group_join(callback: CallbackQuery):
 
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
-            SELECT balance, got_welcome_bonus, joined_group, referrer_id, ref_bonus_given, verified_ip
+            SELECT balance, got_welcome_bonus, referrer_id, ref_bonus_given, verified_ip
             FROM users WHERE tg_id=?
         """, (user_id,))
         row = await cur.fetchone()
 
         balance = row[0] if row else 0
         got_bonus = int(row[1]) if row else 0
-        joined = int(row[2]) if row else 0
-        referrer_id = row[3] if row else None
-        ref_bonus_given = int(row[4]) if row else 0
-        old_ip = row[5] if row else None
+        referrer_id = row[2] if row else None
+        ref_bonus_given = int(row[3]) if row else 0
+        verified_ip = row[4] if row else None
 
-        # 🚫 Prevent duplicate verification by IP
-        cur2 = await db.execute("SELECT tg_id FROM users WHERE verified_ip=?", (user_ip,))
-        existing_user = await cur2.fetchone()
-        if existing_user and existing_user[0] != user_id:
-            await callback.message.answer("⚠️ This device/IP already verified with another account. Bonus denied.")
+        # 🚫 Block multi-account on same IP
+        cur2 = await db.execute("SELECT tg_id FROM users WHERE verified_ip=? AND tg_id!=?", (user_ip, user_id))
+        if await cur2.fetchone():
+            await callback.message.answer("⚠️ This device/IP is already verified with another account. Bonus denied.")
             return
 
-        # 🧱 Already verified
+        # 🟢 Already verified → still show buttons
         if got_bonus:
-            await callback.message.answer("✅ You’re already verified and received your welcome bonus earlier.")
+            await callback.message.answer(
+                "✅ You’re already verified and received your welcome bonus earlier.",
+                reply_markup=main_menu()
+            )
             return
 
-        # ✅ First time verification
-        if not joined:
-            await db.execute("UPDATE users SET joined_group=1 WHERE tg_id=?", (user_id,))
-        await db.execute(
-            "UPDATE users SET balance = balance + 2, got_welcome_bonus=1, verified_ip=? WHERE tg_id=?",
-            (user_ip, user_id)
-        )
+        # 🎁 First-time verification
+        await db.execute("""
+            UPDATE users SET balance = balance + 2, got_welcome_bonus=1, verified_ip=?, joined_group=1 WHERE tg_id=?
+        """, (user_ip, user_id))
         balance += 2
         await callback.message.answer(f"🎉 Welcome bonus ₹2 added! Your new balance: ₹{balance}")
 
-        # 🎯 Referral bonus (once)
-        if (referrer_id and referrer_id != user_id and ref_bonus_given == 0):
-            await db.execute(
-                "UPDATE users SET balance = balance + 1, total_referrals = total_referrals + 1 WHERE tg_id=?",
-                (referrer_id,)
-            )
+        # 🎯 Give referral bonus
+        if referrer_id and referrer_id != user_id and ref_bonus_given == 0:
+            await db.execute("""
+                UPDATE users SET balance = balance + 1, total_referrals = total_referrals + 1 WHERE tg_id=?
+            """, (referrer_id,))
             await db.execute("UPDATE users SET ref_bonus_given=1 WHERE tg_id=?", (user_id,))
             try:
-                await bot.send_message(referrer_id, f"🎉 You got ₹1 bonus for inviting @{callback.from_user.username or user_id}!")
+                await bot.send_message(referrer_id, f"🎉 You earned ₹1 for inviting @{callback.from_user.username or user_id}!")
             except:
                 pass
-
         await db.commit()
 
     await callback.message.answer(
-        "✅ You’re verified and ready to go!\n\n"
-        "Use these quick access buttons 👇",
+        "✅ You’re verified and ready to go!\n\nUse these quick access buttons 👇",
         reply_markup=main_menu()
     )
 
@@ -208,26 +200,25 @@ async def check_group_join(callback: CallbackQuery):
 @dp.message(Command("daily"))
 async def daily_bonus(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO users (tg_id, username, created_at) VALUES (?, ?, ?)",
-                         (m.from_user.id, m.from_user.username, datetime.utcnow().isoformat()))
-        await db.commit()
-
         cur = await db.execute("SELECT balance, last_bonus_date FROM users WHERE tg_id=?", (m.from_user.id,))
         row = await cur.fetchone()
+
+        if not row:
+            await m.answer("Use /start first.")
+            return
+
+        balance, last_bonus = row
         now = datetime.utcnow()
 
-        balance = row[0] if row else 0
-        if row and row[1]:
-            last_bonus = datetime.fromisoformat(row[1]) if row[1] else datetime.utcnow() - timedelta(days=1)
-            if now - last_bonus < timedelta(hours=24):
-                await m.answer("⏰ You’ve already claimed your daily bonus today.")
-                return
+        if last_bonus and now - datetime.fromisoformat(last_bonus) < timedelta(hours=24):
+            await m.answer("⏰ You’ve already claimed your daily bonus today.")
+            return
 
         await db.execute("UPDATE users SET balance = balance + 1, last_bonus_date=? WHERE tg_id=?",
                          (now.isoformat(), m.from_user.id))
         await db.commit()
 
-        await m.answer(f"🎁 ₹1 daily bonus added! Your new balance: ₹{balance + 1}")
+    await m.answer(f"🎁 ₹1 daily bonus added! Your new balance: ₹{balance + 1}")
 
 # ==========================
 # BIND UPI
@@ -247,6 +238,7 @@ async def on_bind_upi(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET upi_id=? WHERE tg_id=?", (upi, m.from_user.id))
         await db.commit()
+
     await m.answer(f"✅ UPI saved successfully:\n`{upi}`", parse_mode="Markdown")
 
 # ==========================
@@ -299,12 +291,14 @@ async def on_withdraw(m: Message):
         await m.answer("❌ Amount exceeds your balance.")
         return
     if not upi_id:
-        await m.answer("❌ Please link your UPI first.")
+        await m.answer("❌ Please link your UPI first using /bindupi.")
         return
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO withdrawals (user_id, amount, upi_id, status, created_at) VALUES (?, ?, ?, ?, ?)",
-                         (m.from_user.id, amount, upi_id, "pending", datetime.utcnow().isoformat()))
+        await db.execute("""
+            INSERT INTO withdrawals (user_id, amount, upi_id, status, created_at)
+            VALUES (?, ?, ?, 'pending', ?)
+        """, (m.from_user.id, amount, upi_id, datetime.utcnow().isoformat()))
         await db.execute("UPDATE users SET balance = balance - ? WHERE tg_id=?", (amount, m.from_user.id))
         await db.commit()
 
