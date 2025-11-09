@@ -2,3 +2,4 @@ aiogram
 aiosqlite
 python-dotenv
 pydantic
+aiohttp==3.9.5

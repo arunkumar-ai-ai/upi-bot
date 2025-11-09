@@ -2,8 +2,9 @@ import asyncio
 import logging
 import re
 import aiosqlite
+import aiohttp
 import os
-from dotenv import load_dotenv  # ✅ NEW: for environment variables
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -13,16 +14,16 @@ from datetime import datetime, timedelta
 # CONFIG
 # ==========================
 logging.basicConfig(level=logging.INFO)
-load_dotenv()  # ✅ Load .env file
+load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # ✅ Loaded securely from .env file
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN not found! Please set it in your .env file.")
 
 DB_PATH = "db.sqlite3"
 MIN_WITHDRAWAL = 10
 GROUP_USERNAME = "ffesportschallenges"
-ADMIN_IDS = [7139153880]  # replace with your Telegram ID
+ADMIN_IDS = [7139153880]
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -60,7 +61,6 @@ async def init_db():
         """)
         await db.commit()
 
-
 # ==========================
 # INLINE BUTTONS
 # ==========================
@@ -68,6 +68,18 @@ def join_buttons():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Join Group", url=f"https://t.me/{GROUP_USERNAME}")],
         [InlineKeyboardButton(text="✅ Continue", callback_data="check_join")]
+    ])
+
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💰 Balance", callback_data="cmd_balance"),
+            InlineKeyboardButton(text="🎁 Daily Bonus", callback_data="cmd_daily")
+        ],
+        [
+            InlineKeyboardButton(text="💳 Bind UPI", callback_data="cmd_bindupi"),
+            InlineKeyboardButton(text="📤 Withdraw", callback_data="cmd_withdraw")
+        ]
     ])
 
 # ==========================
@@ -96,7 +108,7 @@ async def start_cmd(m: Message, command: CommandObject):
     await m.answer(
         f"👋 Welcome to *FREE FIRE ESPORTS BOT!*\n\n"
         f"Join our group to continue and claim your ₹2 Welcome Bonus 💰\n\n"
-        f"👥 Invite friends & earn!\n"
+        f"👥 Invite friends & earn ₹1 per invite!\n"
         f"🔗 Your referral link: [Click Here]({ref_link})",
         reply_markup=join_buttons(),
         parse_mode="Markdown",
@@ -104,20 +116,31 @@ async def start_cmd(m: Message, command: CommandObject):
     )
 
 # ==========================
-# CHECK JOIN & GIVE BONUSES
+# CHECK JOIN & VERIFY USER
 # ==========================
 @dp.callback_query(F.data == "check_join")
 async def check_group_join(callback: CallbackQuery):
     user_id = callback.from_user.id
+
+    # 🌐 Get user's simulated IP
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.ipify.org?format=json") as resp:
+                data = await resp.json()
+                user_ip = data.get("ip")
+    except:
+        user_ip = f"local-{user_id}"
+
+    # 🔍 Check group join
     try:
         member = await bot.get_chat_member(f"@{GROUP_USERNAME}", user_id)
         status = getattr(member, "status", None)
-    except Exception:
+    except:
         status = None
 
     if status not in ["member", "administrator", "creator"]:
         await callback.message.answer(
-            "❌ Please join the group first and try again!\n"
+            "❌ Please join the group first!\n"
             f"👉 [Join Group](https://t.me/{GROUP_USERNAME})",
             parse_mode="Markdown"
         )
@@ -125,62 +148,62 @@ async def check_group_join(callback: CallbackQuery):
 
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
-            SELECT balance, got_welcome_bonus, joined_group, referrer_id, ref_bonus_given
+            SELECT balance, got_welcome_bonus, joined_group, referrer_id, ref_bonus_given, verified_ip
             FROM users WHERE tg_id=?
         """, (user_id,))
         row = await cur.fetchone()
 
         balance = row[0] if row else 0
-        got_welcome = int(row[1]) if row else 0
+        got_bonus = int(row[1]) if row else 0
         joined = int(row[2]) if row else 0
         referrer_id = row[3] if row else None
         ref_bonus_given = int(row[4]) if row else 0
+        old_ip = row[5] if row else None
 
+        # 🚫 Prevent duplicate verification by IP
+        cur2 = await db.execute("SELECT tg_id FROM users WHERE verified_ip=?", (user_ip,))
+        existing_user = await cur2.fetchone()
+        if existing_user and existing_user[0] != user_id:
+            await callback.message.answer("⚠️ This device/IP already verified with another account. Bonus denied.")
+            return
+
+        # 🧱 Already verified
+        if got_bonus:
+            await callback.message.answer("✅ You’re already verified and received your welcome bonus earlier.")
+            return
+
+        # ✅ First time verification
         if not joined:
             await db.execute("UPDATE users SET joined_group=1 WHERE tg_id=?", (user_id,))
-        if not got_welcome:
-            await db.execute("UPDATE users SET balance = balance + 1.5, got_welcome_bonus=1 WHERE tg_id=?", (user_id,))
-            balance += 1.5
-            await callback.message.answer(f"🎉 Welcome bonus ₹1.5 added! Your new balance: ₹{balance}")
-        else:
-            await callback.message.answer("✅ You are already verified and have received your welcome bonus.")
+        await db.execute(
+            "UPDATE users SET balance = balance + 2, got_welcome_bonus=1, verified_ip=? WHERE tg_id=?",
+            (user_ip, user_id)
+        )
+        balance += 2
+        await callback.message.answer(f"🎉 Welcome bonus ₹2 added! Your new balance: ₹{balance}")
 
-
-        if (referrer_id is not None) and (referrer_id != user_id) and (ref_bonus_given == 0):
+        # 🎯 Referral bonus (once)
+        if (referrer_id and referrer_id != user_id and ref_bonus_given == 0):
             await db.execute(
                 "UPDATE users SET balance = balance + 1, total_referrals = total_referrals + 1 WHERE tg_id=?",
                 (referrer_id,)
             )
-            await db.execute(
-                "UPDATE users SET balance = balance + 0.5, ref_bonus_given=1 WHERE tg_id=?", (user_id,)
-            )
+            await db.execute("UPDATE users SET ref_bonus_given=1 WHERE tg_id=?", (user_id,))
             try:
-                await bot.send_message(referrer_id, f"🎉 You got ₹1 referral bonus for inviting @{callback.from_user.username or user_id}!")
-            except Exception:
+                await bot.send_message(referrer_id, f"🎉 You got ₹1 bonus for inviting @{callback.from_user.username or user_id}!")
+            except:
                 pass
-        await db.commit()
 
-       # ✅ Navigation button bar (simple, clean)
-    nav_buttons = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="💰 Balance", callback_data="cmd_balance"),
-            InlineKeyboardButton(text="🎁 Daily Bonus", callback_data="cmd_daily")
-        ],
-        [
-            InlineKeyboardButton(text="💳 Bind UPI", callback_data="cmd_bindupi"),
-            InlineKeyboardButton(text="📤 Withdraw", callback_data="cmd_withdraw")
-        ]
-    ])
+        await db.commit()
 
     await callback.message.answer(
         "✅ You’re verified and ready to go!\n\n"
         "Use these quick access buttons 👇",
-        reply_markup=nav_buttons
+        reply_markup=main_menu()
     )
 
-
 # ==========================
-# DAILY BONUS (FIXED)
+# DAILY BONUS
 # ==========================
 @dp.message(Command("daily"))
 async def daily_bonus(m: Message):
@@ -195,23 +218,19 @@ async def daily_bonus(m: Message):
 
         balance = row[0] if row else 0
         if row and row[1]:
-            try:
-                last_bonus = datetime.fromisoformat(row[1])
-            except Exception:
-                last_bonus = datetime.utcnow() - timedelta(days=1)
+            last_bonus = datetime.fromisoformat(row[1]) if row[1] else datetime.utcnow() - timedelta(days=1)
             if now - last_bonus < timedelta(hours=24):
-                await m.answer("⏰ You’ve already claimed your daily bonus today. Come back later!")
+                await m.answer("⏰ You’ve already claimed your daily bonus today.")
                 return
 
-        await db.execute("UPDATE users SET balance = balance , last_bonus_date=? WHERE tg_id=?",
+        await db.execute("UPDATE users SET balance = balance + 1, last_bonus_date=? WHERE tg_id=?",
                          (now.isoformat(), m.from_user.id))
         await db.commit()
 
-        new_balance = balance + 1
-        await m.answer(f"🎁 ₹1 daily bonus added! Your new balance: ₹{new_balance}")
+        await m.answer(f"🎁 ₹1 daily bonus added! Your new balance: ₹{balance + 1}")
 
 # ==========================
-# BIND UPI (FIXED)
+# BIND UPI
 # ==========================
 @dp.message(Command("bindupi"))
 async def on_bind_upi(m: Message):
@@ -222,15 +241,12 @@ async def on_bind_upi(m: Message):
 
     upi = parts[1].strip()
     if not re.match(r"^[0-9A-Za-z.\-_]+@[A-Za-z]{2,}$", upi):
-        await m.answer("❌ Invalid UPI ID format. Example: 9876543210@paytm")
+        await m.answer("❌ Invalid UPI ID format.")
         return
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO users (tg_id, username, created_at) VALUES (?, ?, ?)",
-                         (m.from_user.id, m.from_user.username, datetime.utcnow().isoformat()))
         await db.execute("UPDATE users SET upi_id=? WHERE tg_id=?", (upi, m.from_user.id))
         await db.commit()
-
     await m.answer(f"✅ UPI saved successfully:\n`{upi}`", parse_mode="Markdown")
 
 # ==========================
@@ -252,13 +268,12 @@ async def on_balance(m: Message):
         f"💰 Balance: ₹{balance}\n"
         f"👥 Referrals: {total_referrals}\n"
         f"🏦 UPI: {upi_id or 'Not set (use /bindupi)'}\n\n"
-        f"🔗 *Your Referral Link:* [Click Here]({ref_link})",
-        parse_mode="Markdown",
-        disable_web_page_preview=True
+        f"🔗 Referral Link: [Click Here]({ref_link})",
+        parse_mode="Markdown"
     )
 
 # ==========================
-# WITHDRAW (with admin confirm)
+# WITHDRAW
 # ==========================
 @dp.message(Command("withdraw"))
 async def on_withdraw(m: Message):
@@ -284,92 +299,16 @@ async def on_withdraw(m: Message):
         await m.answer("❌ Amount exceeds your balance.")
         return
     if not upi_id:
-        await m.answer("❌ Please link your UPI first with /bindupi.")
+        await m.answer("❌ Please link your UPI first.")
         return
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO withdrawals (user_id, amount, upi_id, status, created_at) VALUES (?, ?, ?, ?, ?)",
-            (m.from_user.id, amount, upi_id, "pending", datetime.utcnow().isoformat())
-        )
+        await db.execute("INSERT INTO withdrawals (user_id, amount, upi_id, status, created_at) VALUES (?, ?, ?, ?, ?)",
+                         (m.from_user.id, amount, upi_id, "pending", datetime.utcnow().isoformat()))
         await db.execute("UPDATE users SET balance = balance - ? WHERE tg_id=?", (amount, m.from_user.id))
         await db.commit()
 
-        cur = await db.execute("SELECT last_insert_rowid()")
-        withdrawal_id = (await cur.fetchone())[0]
-
     await m.answer("✅ Withdrawal request submitted!")
-
-    # notify admin with confirm button
-    for adm in ADMIN_IDS:
-        markup = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Confirm Payment", callback_data=f"confirm_{withdrawal_id}")
-        ]])
-        await bot.send_message(
-            adm,
-            f"💸 *New Withdrawal Request*\n\n"
-            f"👤 User: @{m.from_user.username or m.from_user.id}\n"
-            f"💰 Amount: ₹{amount}\n"
-            f"🏦 UPI: `{upi_id}`\n"
-            f"🆔 Request ID: #{withdrawal_id}",
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-
-# ==========================
-# ADMIN CONFIRM BUTTON
-# ==========================
-@dp.callback_query(F.data.startswith("confirm_"))
-async def confirm_payment(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("⛔ Not authorized!", show_alert=True)
-        return
-
-    withdrawal_id = int(callback.data.split("_")[1])
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT user_id, amount, upi_id, status FROM withdrawals WHERE id=?", (withdrawal_id,))
-        row = await cur.fetchone()
-
-        if not row:
-            await callback.message.answer("❌ Withdrawal not found.")
-            return
-
-        user_id, amount, upi_id, status = row
-        if status != "pending":
-            await callback.message.answer("⚠️ Already processed.")
-            return
-
-        await db.execute("UPDATE withdrawals SET status='completed' WHERE id=?", (withdrawal_id,))
-        await db.commit()
-
-    await callback.message.edit_text(
-        f"✅ Payment Confirmed!\n\nWithdrawal #{withdrawal_id} marked as *completed.*",
-        parse_mode="Markdown"
-    )
-
-    try:
-        await bot.send_message(user_id, f"💰 Your withdrawal of ₹{amount} has been successfully processed!")
-    except:
-        pass
-
-    # ==========================
-# NAVIGATION BUTTON HANDLERS
-# ==========================
-@dp.callback_query(F.data.startswith("cmd_"))
-async def handle_command_buttons(callback: CallbackQuery):
-    cmd = callback.data.replace("cmd_", "")
-
-    if cmd == "balance":
-        await on_balance(callback.message)
-    elif cmd == "daily":
-        await daily_bonus(callback.message)
-    elif cmd == "bindupi":
-        await callback.message.answer("💳 Please type:\n`/bindupi your_upi@bank`", parse_mode="Markdown")
-    elif cmd == "withdraw":
-        await callback.message.answer(f"📤 To withdraw, type:\n`/withdraw <amount>` (min ₹{MIN_WITHDRAWAL})", parse_mode="Markdown")
-    else:
-        await callback.message.answer("⚠️ Unknown command.")
-
 
 # ==========================
 # MAIN
