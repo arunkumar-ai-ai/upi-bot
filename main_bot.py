@@ -70,6 +70,15 @@ async def init_db():
         """)
         await db.commit()
 
+# Utility: ensure user exists
+async def ensure_user(tg_id, username):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (tg_id, username) VALUES (?, ?)",
+            (tg_id, username)
+        )
+        await db.commit()
+
 # ==========================
 # BUTTONS (Updated)
 # ==========================
@@ -94,23 +103,20 @@ def main_menu():
 @dp.message(Command("start"))
 async def start_cmd(m: Message, command: CommandObject):
     await init_db()
-    referrer_id = int(command.args) if command.args and command.args.isdigit() else None
+    await ensure_user(m.from_user.id, m.from_user.username)
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT OR IGNORE INTO users (tg_id, username)
-            VALUES (?, ?)
-        """, (m.from_user.id, m.from_user.username))
-        if referrer_id and referrer_id != m.from_user.id:
+    referrer_id = int(command.args) if command.args and command.args.isdigit() else None
+    if referrer_id and referrer_id != m.from_user.id:
+        async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE users SET referrer_id=? WHERE tg_id=?", (referrer_id, m.from_user.id))
-        await db.commit()
+            await db.commit()
 
     ref_link = f"https://t.me/share_and_earn_money_bot?start={m.from_user.id}"
     await m.answer(
         f"👋 Welcome to *FREE FIRE ESPORTS BOT!*\n\n"
         f"Join our group and claim ₹2 Welcome Bonus 💰\n\n"
         f"👥 Invite friends & earn ₹1 per invite!\n"
-        f"🔗 Your referral link: [Click Here]({ref_link})",
+        f"🔗 Your referral link:({ref_link})",
         parse_mode="Markdown",
         disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup(
@@ -127,6 +133,9 @@ async def start_cmd(m: Message, command: CommandObject):
 @dp.callback_query(F.data == "verify_join")
 async def verify_join(callback: CallbackQuery):
     user_id = callback.from_user.id
+    username = callback.from_user.username
+    await ensure_user(user_id, username)
+
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get("https://api.ipify.org?format=json") as r:
@@ -166,6 +175,7 @@ async def verify_join(callback: CallbackQuery):
 # ==========================
 @dp.callback_query(F.data.startswith("cmd_"))
 async def handle_buttons(callback: CallbackQuery, state: FSMContext):
+    await ensure_user(callback.from_user.id, callback.from_user.username)
     data = callback.data.replace("cmd_", "")
     if data == "balance":
         await show_balance(callback.message)
@@ -182,19 +192,18 @@ async def handle_buttons(callback: CallbackQuery, state: FSMContext):
 # BALANCE
 # ==========================
 async def show_balance(m: Message):
+    await ensure_user(m.from_user.id, m.from_user.username)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT balance, total_referrals, upi_id FROM users WHERE tg_id=?", (m.from_user.id,))
         row = await cur.fetchone()
-        if not row:
-            await m.answer("Use /start first.")
-            return
-        balance, refs, upi = row
+        balance, refs, upi = row or (0, 0, None)
     await m.answer(f"💰 Balance: ₹{balance}\n👥 Referrals: {refs}\n🏦 UPI: {upi or 'Not set'}", parse_mode="Markdown")
 
 # ==========================
 # REFERRALS
 # ==========================
 async def show_referrals(m: Message):
+    await ensure_user(m.from_user.id, m.from_user.username)
     ref_link = f"https://t.me/share_and_earn_money_bot?start={m.from_user.id}"
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT total_referrals FROM users WHERE tg_id=?", (m.from_user.id,))
@@ -213,13 +222,11 @@ async def show_referrals(m: Message):
 # DAILY BONUS
 # ==========================
 async def daily_bonus(m: Message):
+    await ensure_user(m.from_user.id, m.from_user.username)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT balance, last_bonus_date FROM users WHERE tg_id=?", (m.from_user.id,))
         row = await cur.fetchone()
-        if not row:
-            await m.answer("Use /start first.")
-            return
-        balance, last = row
+        balance, last = row or (0, None)
         now = datetime.utcnow()
         if last and now - datetime.fromisoformat(last) < timedelta(hours=24):
             await m.answer("⏰ Already claimed daily bonus today.")
@@ -233,6 +240,7 @@ async def daily_bonus(m: Message):
 # ==========================
 @dp.message(Command("bindupi"))
 async def bind_upi_start(m: Message, state: FSMContext):
+    await ensure_user(m.from_user.id, m.from_user.username)
     await state.set_state(BindUPI.waiting_for_upi)
     await m.answer("💳 Enter your UPI ID (example: 9876543210@paytm)")
 
@@ -253,11 +261,13 @@ async def save_upi(m: Message, state: FSMContext):
 # ==========================
 @dp.message(Command("withdraw"))
 async def withdraw_start(m: Message, state: FSMContext):
+    await ensure_user(m.from_user.id, m.from_user.username)
     await state.set_state(Withdraw.waiting_for_amount)
     await m.answer(f"💸 Enter amount to withdraw (min ₹{MIN_WITHDRAWAL})")
 
 @dp.message(Withdraw.waiting_for_amount)
 async def withdraw_process(m: Message, state: FSMContext):
+    await ensure_user(m.from_user.id, m.from_user.username)
     if not m.text.isdigit():
         await m.answer("❌ Invalid amount.")
         return
@@ -291,6 +301,7 @@ async def confirm_withdraw(callback: CallbackQuery, state: FSMContext):
     amount = data["amount"]
     upi = data["upi"]
     user_id = callback.from_user.id
+    await ensure_user(user_id, callback.from_user.username)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET balance = balance - ? WHERE tg_id=?", (amount, user_id))
         await db.execute("""
@@ -298,21 +309,8 @@ async def confirm_withdraw(callback: CallbackQuery, state: FSMContext):
             VALUES (?, ?, ?, 'pending', ?)
         """, (user_id, amount, upi, datetime.utcnow().isoformat()))
         await db.commit()
-        cur = await db.execute("SELECT last_insert_rowid()")
-        wid = (await cur.fetchone())[0]
     await callback.message.edit_text("✅ Withdrawal request submitted!")
-    for admin in ADMIN_IDS:
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Approve", callback_data=f"approve_{wid}"),
-             InlineKeyboardButton(text="❌ Reject", callback_data=f"reject_{wid}")]
-        ])
-        await bot.send_message(admin, f"💸 New Withdrawal Request\n\nUser: @{callback.from_user.username}\nUPI: `{upi}`\nAmount: ₹{amount}", parse_mode="Markdown", reply_markup=markup)
     await state.clear()
-
-@dp.callback_query(F.data == "cancel_withdraw")
-async def cancel_withdraw(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text("❌ Withdrawal cancelled.")
 
 # ==========================
 # MAIN
